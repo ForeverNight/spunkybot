@@ -23,7 +23,7 @@ Modify the files '/conf/settings.conf' and '/conf/rules.conf'
 Run the bot: python spunky.py
 """
 
-__version__ = '1.13.0'
+__version__ = '1.13.1'
 
 
 ### IMPORTS
@@ -41,7 +41,7 @@ from threading import RLock
 import lib.pygeoip as pygeoip
 import lib.schedule as schedule
 from lib.pyquake3 import PyQuake3
-
+from lib.dbinteract import DBInteractor
 
 # Get an instance of a logger
 logger = logging.getLogger('spunkybot')
@@ -338,8 +338,7 @@ class LogParser(object):
         # log that the configuration file has been loaded
         logger.info("Configuration loaded  : OK")
         # enable/disable option to get Head Admin by checking existence of head admin in database
-        curs.execute("SELECT COUNT(*) FROM `xlrstats` WHERE `admin_role` = 100")
-        self.iamgod = True if int(curs.fetchone()[0]) < 1 else False
+        self.iamgod = interactor.getHeadAdminExists()
         logger.info("Connecting to Database: OK")
         logger.debug("Cmd !iamgod available : %s", self.iamgod)
         self.uptime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
@@ -518,9 +517,7 @@ class LogParser(object):
         """
         delete expired ban points
         """
-        # remove expired ban_points
-        curs.execute("DELETE FROM `ban_points` WHERE `expires` < '{}'".format(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))))
-        conn.commit()
+        interactor.removeExpiredEntries()
 
     def taskmanager(self):
         """
@@ -1237,8 +1234,7 @@ class LogParser(object):
         """
         player_id = user_id.lstrip('@')
         if player_id.isdigit() and int(player_id) > 1:
-            curs.execute("SELECT `guid`,`name`,`ip_address` FROM `player` WHERE `id` = {}".format(int(player_id)))
-            result = curs.fetchone()
+            result = interactor.getPlayerById(player_id)
             if result:
                 victim = Player(player_num=1023, ip_address=str(result[2]), guid=str(result[0]), name=str(result[1]))
                 victim.define_offline_player(player_id=int(player_id))
@@ -1503,8 +1499,7 @@ class LogParser(object):
 
             # xlrtopstats
             elif (sar['command'] in ('!xlrtopstats', '!topstats')) and self.game.players[sar['player_num']].get_admin_role() >= COMMANDS['xlrtopstats']['level']:
-                curs.execute("SELECT name FROM `xlrstats` WHERE (`rounds` > 35 or `kills` > 500) and `last_played` > '{}' ORDER BY `ratio` DESC LIMIT 3".format(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime((time.time() - 10368000)))))  # last played within the last 120 days
-                result = curs.fetchall()
+                result = interactor.getXlrTopStats120Days()
                 toplist = ['^1#%s ^7%s' % (index + 1, result[index][0]) for index in xrange(len(result))]
                 msg = "^3Top players: %s" % str(", ".join(toplist)) if toplist else "^3Awards still available"
                 self.game.rcon_tell(sar['player_num'], msg)
@@ -2206,8 +2201,8 @@ class LogParser(object):
 
             # status - report the status of the bot
             elif sar['command'] == '!status' and self.game.players[sar['player_num']].get_admin_role() >= COMMANDS['status']['level']:
-                curs.execute("SELECT 1 FROM player LIMIT 1;")
-                msg = "^7Database is ^2UP^7 and Bot started at ^2%s" % self.uptime if curs.fetchall() else "^7Database appears to be ^1DOWN"
+                dbAlive = interactor.isDbAlive()
+                msg = "^7Database is ^2UP^7 and Bot started at ^2%s" % self.uptime if dbAlive else "^7Database appears to be ^1DOWN"
                 self.game.rcon_tell(sar['player_num'], msg)
 
             # version - display the version of the bot
@@ -2285,8 +2280,7 @@ class LogParser(object):
                     if not found:
                         self.game.rcon_tell(sar['player_num'], msg)
                     else:
-                        curs.execute("SELECT `expires` FROM `ban_list` WHERE `expires` > '{}' AND `guid` = '{}'".format(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time())), victim.get_guid()))
-                        result = curs.fetchone()
+                        result = interactor.getActiveBansByPlayerGuid(victim.get_guid())
                         if result:
                             self.game.rcon_tell(sar['player_num'], "^3%s ^7has an active ban until [^1%s^7]" % (victim.get_name(), str(result[0])))
                         else:
@@ -2576,8 +2570,7 @@ class LogParser(object):
             elif (sar['command'] == '!lookup' or sar['command'] == '!l') and self.game.players[sar['player_num']].get_admin_role() >= COMMANDS['lookup']['level']:
                 if line.split(sar['command'])[1]:
                     arg = line.split(sar['command'])[1].strip()
-                    curs.execute("SELECT `id`,`name`,`time_joined` FROM `player` WHERE `name` like '%{}%' ORDER BY `time_joined` DESC LIMIT 8".format(arg))
-                    result = curs.fetchall()
+                    result = interactor.getPlayerByName(arg)
                     for row in result:
                         self.game.rcon_tell(sar['player_num'], "^7[^2@%s^7] %s ^7[^1%s^7]" % (str(row[0]), str(row[1]), str(row[2])), False)
                     if not result:
@@ -2706,16 +2699,14 @@ class LogParser(object):
 
             # banlist - display the last active 10 bans
             elif sar['command'] == '!banlist' and self.game.players[sar['player_num']].get_admin_role() >= COMMANDS['banlist']['level']:
-                curs.execute("SELECT `id`,`name` FROM `ban_list` WHERE `expires` > '{}' ORDER BY `timestamp` DESC LIMIT 10".format(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))))
-                result = curs.fetchall()
+                result = interactor.getLast10ActiveBans()
                 banlist = ['^7[^2@%s^7] %s' % (row[0], row[1]) for row in result]
                 msg = 'Currently no one is banned' if not banlist else str(", ".join(banlist))
                 self.game.rcon_tell(sar['player_num'], "^7Banlist: %s" % msg)
 
             # lastbans - list the last 4 bans
             elif (sar['command'] == '!lastbans' or sar['command'] == '!bans') and self.game.players[sar['player_num']].get_admin_role() >= COMMANDS['lastbans']['level']:
-                curs.execute("SELECT `id`,`name`,`expires` FROM `ban_list` ORDER BY `timestamp` DESC LIMIT 4")
-                result = curs.fetchall()
+                
                 lastbanlist = ['^3[^2@%s^3] ^7%s ^3(^1%s^3)' % (row[0], row[1], row[2]) for row in result]
                 if result:
                     for item in lastbanlist:
@@ -2728,17 +2719,14 @@ class LogParser(object):
                 if line.split(sar['command'])[1]:
                     arg = line.split(sar['command'])[1].strip().lstrip('@')
                     if arg.isdigit():
-                        curs.execute("SELECT `guid`,`name`,`ip_address` FROM `ban_list` WHERE `id` = {}".format(int(arg)))
-                        result = curs.fetchone()
+                        result = interactor.getBanByPlayerId(arg)
                         if result:
                             guid = result[0]
                             name = str(result[1])
                             ip_addr = str(result[2])
-                            curs.execute("DELETE FROM `ban_list` WHERE `id` = {}".format(int(arg)))
-                            conn.commit()
+                            interactor.unbanByPlayerId(arg)
                             self.game.rcon_tell(sar['player_num'], "^7Player ^2%s ^7unbanned" % name)
-                            curs.execute("DELETE FROM `ban_list` WHERE `guid` = '{}' OR ip_address = '{}'".format(guid, ip_addr))
-                            conn.commit()
+                            interactor.unbanByGuidAndIpAddr(guid, ip_addr)
                             self.game.rcon_tell(sar['player_num'], "^7Try to remove duplicates of [^1%s^7]" % ip_addr)
                         else:
                             self.game.rcon_tell(sar['player_num'], "^7Invalid ID, no Player found")
@@ -3307,14 +3295,12 @@ class Player(object):
 
         # check ban_list
         now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.time_joined))
-        curs.execute("SELECT `id`,`reason` FROM `ban_list` WHERE `guid` = '{}' AND `expires` > '{}'".format(self.guid, now))
-        result = curs.fetchone()
+        result = interactor.getBanByGuid(self.guid, now=now)
         if result:
             self.ban_id = result[0]
             self.ban_msg = str(result[1]).split(',')[0]
         else:
-            curs.execute("SELECT `id`,`reason` FROM `ban_list` WHERE `ip_address` = '{}' AND `expires` > '{}'".format(self.address, now))
-            result = curs.fetchone()
+            result = interactor.getBanByIpAddr(ip_address, now)
             if result:
                 self.ban_id = result[0]
                 self.ban_msg = str(result[1]).split(',')[0]
@@ -3327,21 +3313,17 @@ class Player(object):
         except ValueError:
             expire_date = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(2147483647))
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
-        curs.execute("SELECT `expires` FROM `ban_list` WHERE `guid` = '{}'".format(self.guid))
-        result = curs.fetchone()
+        result = interactor.getCurrentBanExpirationByGuid(self.guid)
         if result:
             if result[0] < expire_date:
                 # update already existing ban
-                curs.execute("UPDATE `ban_list` SET `ip_address` = '{}',`expires` = '{}',`reason` = '{}' WHERE `guid` = '{}'".format(self.address, expire_date, reason, self.guid))
-                conn.commit()
+                interactor.updateBan(self.guid, self.address, expire_date, reason)
                 return True
             # update IP address of existing ban
-            curs.execute("UPDATE `ban_list` SET `ip_address` = '{}' WHERE `guid` = '{}'".format(self.address, self.guid))
-            conn.commit()
+            interactor.updateBan(self.guid, self.address, result[0], result[1])
             return False
         # create new ban
-        curs.execute('INSERT INTO `ban_list` (`id`,`guid`,`name`,`ip_address`,`expires`,`timestamp`,`reason`) VALUES ({},"{}","{}","{}","{}","{}","{}")'.format(self.player_id, self.guid, self.name, self.address, expire_date, timestamp, reason))
-        conn.commit()
+        interactor.createBan(self.player_id, self.guid, self.name, self.address, expire_date, timestamp, reason)
         return True
 
     def add_ban_point(self, point_type, duration):
@@ -3350,12 +3332,11 @@ class Player(object):
         except ValueError:
             expire_date = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(2147483647))
         # add ban_point to database
-        curs.execute("INSERT INTO `ban_points` (`guid`,`point_type`,`expires`) VALUES ('{}','{}','{}')".format(self.guid, point_type, expire_date))
-        conn.commit()
+        interactor.addBanPoint(self.guid, point_type, expire_date)
         # check amount of ban_points
-        curs.execute("SELECT COUNT(*) FROM `ban_points` WHERE `guid` = '{}' AND `expires` > '{}'".format(self.guid, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))))
+        banPoints = interactor.getBanPoints(self.guid, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time())))
         # ban player when he gets more than 2 ban_points
-        if int(curs.fetchone()[0]) > 2:
+        if int(banPoints[0]) > 2:
             # ban duration = 3 * expiration time
             ban_duration = duration * 3
             self.ban(duration=ban_duration, reason=point_type, admin='bot')
@@ -3404,46 +3385,37 @@ class Player(object):
     def save_info(self):
         if self.registered_user:
             ratio = round(float(self.db_kills) / float(self.db_deaths), 2) if self.db_deaths > 0 else 1.0
-            curs.execute("UPDATE `xlrstats` SET `kills` = {},`deaths` = {},`headshots` = {},`team_kills` = {},`team_death` = {},`max_kill_streak` = {},`suicides` = {},`rounds` = `rounds` + 1,`ratio` = {} WHERE `guid` = '{}'".format(self.db_kills, self.db_deaths, self.db_head_shots, self.db_tk_count, self.db_team_death, self.db_killing_streak, self.db_suicide, ratio, self.guid))
-            conn.commit()
+            interactor.putInfoInXlrStats(self.guid, self.db_kills, self.db_deaths, self.db_head_shots, self.db_tk_count, self.db_team_death, self.db_killing_streak, self.db_suicide, ratio)
 
     def check_database(self):
         now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
         # check player table
-        curs.execute("SELECT COUNT(*) FROM `player` WHERE `guid` = '{}'".format(self.guid))
-        if int(curs.fetchone()[0]) == 0:
+        existingPlayer = interactor.isGuidInDb(self.guid)
+        if not existingPlayer:
             # add new player to database
-            curs.execute('INSERT INTO `player` (`guid`,`name`,`ip_address`,`time_joined`,`aliases`) VALUES ("{}","{}","{}","{}","{}")'.format(self.guid, self.name, self.address, now, self.name))
-            conn.commit()
+            interactor.addPlayer(self.guid, self.name, self.address, now)
             self.aliases.append(self.name)
             self.first_time = True
         else:
             # update name, IP address and last join date
-            curs.execute('UPDATE `player` SET `name` = "{}",`ip_address` = "{}",`time_joined` = "{}" WHERE `guid` = "{}"'.format(self.name, self.address, now, self.guid))
-            conn.commit()
+            interactor.updatePlayer(self.guid, self.name, self.address, now)
             # get known aliases
-            curs.execute('SELECT `aliases` FROM `player` WHERE `guid` = "{}"'.format(self.guid))
-            result = curs.fetchone()
+            result = interactor.getAliasesByGuid(self.guid)
             # create list of aliases
             self.aliases = result[0].split(", ")
             # add new alias to list
             if self.name not in self.aliases and len(self.aliases) < 15:
                 self.aliases.append(self.name)
                 alias_string = ', '.join(self.aliases)
-                curs.execute('UPDATE `player` SET `aliases` = "{}" WHERE `guid` = "{}"'.format(alias_string, self.guid))
-                conn.commit()
+                interactor.updateAliases(self.guid, alias_string)
         # get player-id
-        curs.execute("SELECT `id` FROM `player` WHERE `guid` = '{}'".format(self.guid))
-        self.player_id = curs.fetchone()[0]
+        self.player_id = interactor.getPlayerIdByGuid(self.guid)
         # check XLRSTATS table
-        curs.execute("SELECT COUNT(*) FROM `xlrstats` WHERE `guid` = '{}'".format(self.guid))
-        if int(curs.fetchone()[0]) == 0:
-            self.registered_user = False
-        else:
-            self.registered_user = True
+        self.registered_user = interactor.isPlayerRegistered(self.guid)
+        
+        if self.registered_user is True:
             # get DB DATA for XLRSTATS
-            curs.execute("SELECT `last_played`,`num_played`,`kills`,`deaths`,`headshots`,`team_kills`,`team_death`,`max_kill_streak`,`suicides`,`admin_role`,`first_seen` FROM `xlrstats` WHERE `guid` = '{}'".format(self.guid))
-            result = curs.fetchone()
+            result = interactor.getXlrStatsByGuid(self.guid)
             self.last_visit = result[0]
             self.num_played = result[1]
             self.db_kills = result[2]
@@ -3456,23 +3428,20 @@ class Player(object):
             self.admin_role = result[9]
             self.first_seen = result[10]
             # update name, last_played and increase num_played counter
-            curs.execute('UPDATE `xlrstats` SET `name` = "{}",`last_played` = "{}",`num_played` = `num_played` + 1 WHERE `guid` = "{}"'.format(self.name, now, self.guid))
-            conn.commit()
+            interactor.updateXlrStats(self.guid, self.name, now)
 
     def define_offline_player(self, player_id):
         self.player_id = player_id
         # get known aliases
-        curs.execute("SELECT `aliases` FROM `player` WHERE `guid` = '{}'".format(self.guid))
-        result = curs.fetchone()
+        result = interactor.getAliasesByGuid(self.guid)
         # create list of aliases
         self.aliases = result[0].split(", ")
-        curs.execute("SELECT COUNT(*) FROM `xlrstats` WHERE `guid` = '{}'".format(self.guid))
-        if int(curs.fetchone()[0]) == 0:
+        isRegisteredUser = interactor.isPlayerRegistered(self.guid)
+        if isRegisteredUser is False:
             self.admin_role = 0
             self.registered_user = False
         else:
-            curs.execute("SELECT `last_played`,`admin_role` FROM `xlrstats` WHERE `guid` = '{}'".format(self.guid))
-            result = curs.fetchone()
+            result = interactor.getLastPlayedAndAdminByGuid(self.guid)
             self.last_visit = result[0]
             self.admin_role = result[1]
             self.registered_user = True
@@ -3480,8 +3449,7 @@ class Player(object):
     def register_user_db(self, role=1):
         if not self.registered_user:
             now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
-            curs.execute('INSERT INTO `xlrstats` (`guid`,`name`,`ip_address`,`first_seen`,`last_played`,`num_played`,`admin_role`) VALUES ("{}","{}","{}","{}","{}",1,{})'.format(self.guid, self.name, self.address, now, now, role))
-            conn.commit()
+            interactor.addPlayerToXlrStats(self.guid, self.name, self.address, role, now)
             self.registered_user = True
             self.admin_role = role
             self.welcome_msg = False
@@ -3489,8 +3457,7 @@ class Player(object):
             self.last_visit = now
 
     def update_db_admin_role(self, role):
-        curs.execute("UPDATE `xlrstats` SET `admin_role` = {} WHERE `guid` = '{}'".format(role, self.guid))
-        conn.commit()
+        interactor.setAdminRole(self.guid, role)
         # overwrite admin role in game, no reconnect of player required
         self.set_admin_role(role)
 
@@ -3767,8 +3734,7 @@ class Player(object):
         self.tk_killer_names = []
         self.last_warn_time = 0
         # clear ban_points
-        curs.execute("DELETE FROM `ban_points` WHERE `guid` = '{}' and `expires` > '{}'".format(self.guid, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))))
-        conn.commit()
+        interactor.clearBanPointsByGuid(self.guid)
 
     def team_death(self):
         # increase team death counter
@@ -4227,42 +4193,43 @@ if __name__ == "__main__":
     HOME = os.path.dirname(os.path.realpath(__file__))
 
     # load the GEO database and store it globally in interpreter memory
-    GEOIP = pygeoip.Database(os.path.join(HOME, 'lib', 'GeoIP.dat'))
-
-    # connect to database
-    conn = sqlite3.connect(os.path.join(HOME, 'data.sqlite'))
-    curs = conn.cursor()
+    GEOIP = pygeoip.Database(os.path.join(HOME, 'lib', 'GeoIP.dat'))  
     CONFIG = ConfigParser.ConfigParser()
     CONF_PATH = os.path.join(HOME, 'conf', 'settings.conf')
     CONFIG.read(CONF_PATH)
+    
+    # connect to database
+    interactor = DBInteractor('sqlite3', HOME)
+    interactor.openConnection()
 
     # enable/disable debug output
     verbose = CONFIG.getboolean('bot', 'verbose') if CONFIG.has_option('bot', 'verbose') else False
+    
     # logging format
     formatter = logging.Formatter('[%(asctime)s] %(levelname)-8s %(message)s', datefmt='%d.%m.%Y %H:%M:%S')
+    
     # console logging
     console = logging.StreamHandler()
     if not verbose:
         console.setLevel(logging.INFO)
     console.setFormatter(formatter)
+    
     # devel.log file
     devel_log = logging.handlers.RotatingFileHandler(filename=os.path.join(HOME, 'devel.log'), maxBytes=2097152, backupCount=1, encoding='utf8')
     devel_log.setLevel(logging.INFO)
     devel_log.setFormatter(formatter)
+    
     # add logging handler
     logger.addHandler(console)
     logger.addHandler(devel_log)
-
     logger.info("*** Spunky Bot v%s : www.spunkybot.de ***", __version__)
     logger.info("Loading config file   : %s", CONF_PATH)
+    
     # create tables if not exists
-    curs.execute('CREATE TABLE IF NOT EXISTS xlrstats (id INTEGER PRIMARY KEY NOT NULL, guid TEXT NOT NULL, name TEXT NOT NULL, ip_address TEXT NOT NULL, first_seen DATETIME, last_played DATETIME, num_played INTEGER DEFAULT 1, kills INTEGER DEFAULT 0, deaths INTEGER DEFAULT 0, headshots INTEGER DEFAULT 0, team_kills INTEGER DEFAULT 0, team_death INTEGER DEFAULT 0, max_kill_streak INTEGER DEFAULT 0, suicides INTEGER DEFAULT 0, ratio REAL DEFAULT 0, rounds INTEGER DEFAULT 0, admin_role INTEGER DEFAULT 1)')
-    curs.execute('CREATE TABLE IF NOT EXISTS player (id INTEGER PRIMARY KEY NOT NULL, guid TEXT NOT NULL, name TEXT NOT NULL, ip_address TEXT NOT NULL, time_joined DATETIME, aliases TEXT)')
-    curs.execute('CREATE TABLE IF NOT EXISTS ban_list (id INTEGER PRIMARY KEY NOT NULL, guid TEXT NOT NULL, name TEXT, ip_address TEXT, expires DATETIME DEFAULT 259200, timestamp DATETIME, reason TEXT)')
-    curs.execute('CREATE TABLE IF NOT EXISTS ban_points (id INTEGER PRIMARY KEY NOT NULL, guid TEXT NOT NULL, point_type TEXT, expires DATETIME)')
+    interactor.initializedb()
 
     # create instance of LogParser
     LogParser()
 
     # close database connection
-    conn.close()
+    interactor.closeConnection()
